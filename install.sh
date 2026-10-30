@@ -12,6 +12,7 @@
 #          6. 写入 settings.json 默认项（不动已有配置）
 #          7. 检测模型 API key 并给出 /login 指引
 #          8. 自检验证 + 汇总报告
+#          9. 可选：交互式启动 pi-web（密码保护 + 局域网远程访问）
 #
 #  用法：
 #      curl -fsSL <本脚本地址> | bash      # 或：
@@ -23,6 +24,7 @@
 #      PI_SETUP_SKILLS     0   跳过 Skills 安装
 #      PI_SETUP_MCP        0   跳过 MCP 配置
 #      PI_SETUP_PLUGINS    0   跳过插件安装
+#      PI_SETUP_WEB        0   跳过 pi-web 启动询问
 #
 #  幂等：可重复运行，已存在配置不会被覆盖。
 # =============================================================================
@@ -180,7 +182,7 @@ info "配置目录: $AGENT_DIR"
 mkdir -p "$AGENT_DIR"
 
 # ---------- 1. 前置依赖 ----------
-step "1/8 检查前置依赖"
+step "1/9 检查前置依赖"
 missing=0
 for c in curl git; do
   if have "$c"; then ok "$c 已就绪"; else err "缺少 $c"; missing=$((missing+1)); fi
@@ -253,7 +255,7 @@ if [ "$missing" -gt 0 ]; then
 fi
 
 # ---------- 2. 安装 Pi ----------
-step "2/8 安装 / 更新 Pi"
+step "2/9 安装 / 更新 Pi"
 
 PI_INSTALL_METHOD="${PI_INSTALL_METHOD:-auto}"
 if [ "$PI_INSTALL_METHOD" = "auto" ]; then
@@ -305,7 +307,7 @@ fi
 ok "Pi 就绪：$(pi --version 2>/dev/null | head -1)"
 
 # ---------- 3. 安装插件 ----------
-step "3/8 安装精选插件（${#PACKAGES[@]} 个 Pi Packages）"
+step "3/9 安装精选插件（${#PACKAGES[@]} 个 Pi Packages）"
 if [ "${PI_SETUP_PLUGINS:-1}" != "1" ]; then
   warn "已设置 PI_SETUP_PLUGINS=0，跳过插件安装"
 else
@@ -321,7 +323,7 @@ else
 fi
 
 # ---------- 4. 安装 Skills ----------
-step "4/8 安装 Skills"
+step "4/9 安装 Skills"
 if [ "${PI_SETUP_SKILLS:-1}" != "1" ]; then
   warn "已设置 PI_SETUP_SKILLS=0，跳过 Skills 安装"
 else
@@ -345,7 +347,7 @@ else
 fi
 
 # ---------- 5. 配置 MCP ----------
-step "5/8 配置 MCP servers"
+step "5/9 配置 MCP servers"
 if [ "${PI_SETUP_MCP:-1}" != "1" ]; then
   warn "已设置 PI_SETUP_MCP=0，跳过 MCP 配置"
 else
@@ -375,7 +377,7 @@ EOF
 fi
 
 # ---------- 6. 写入 settings.json 默认项 ----------
-step "6/8 写入 settings.json 默认项（不覆盖已有）"
+step "6/9 写入 settings.json 默认项（不覆盖已有）"
 SETTINGS_DEFAULTS='{
   "$schema": "https://pi.dev/schemas/settings.schema.json",
   "defaultThinkingLevel": "high",
@@ -385,7 +387,7 @@ SETTINGS_DEFAULTS='{
 fill_settings_defaults "$SETTINGS_DEFAULTS"
 
 # ---------- 7. 模型 API key 检测 ----------
-step "7/8 检测模型 API key"
+step "7/9 检测模型 API key"
 KEYS=(
   "ANTHROPIC_API_KEY|Anthropic"
   "OPENAI_API_KEY|OpenAI"
@@ -416,13 +418,70 @@ if [ -f "$AGENT_DIR/auth.json" ]; then
 fi
 
 # ---------- 8. 验证 ----------
-step "8/8 自检验证"
+step "8/9 自检验证"
 ok "Pi 版本: $(pi --version 2>/dev/null | head -1)"
 info "已配置的 packages："
 pi list 2>/dev/null | sed 's/^/     /' || warn "pi list 无输出"
 echo ""
 info "MCP servers 状态（首次连接 npx 可能较慢）："
 pi mcp list 2>&1 | sed 's/^/     /' || warn "pi mcp list 失败（可稍后手动验证）"
+
+# ---------- 9. 可选：启动 pi-web ----------
+step "9/9 启动 pi-web Web UI（可选）"
+if [ "${PI_SETUP_WEB:-1}" != "1" ]; then
+  warn "已设置 PI_SETUP_WEB=0，跳过 pi-web 启动"
+elif ! have pi-web; then
+  warn "未检测到 pi-web 命令，跳过（可先执行: npm install -g @agegr/pi-web）"
+else
+  PI_WEB_PORT="${PI_WEB_PORT:-30141}"
+  if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$PI_WEB_PORT/" 2>/dev/null; then
+    warn "端口 $PI_WEB_PORT 已有 pi-web 在运行（pi-web status 查看），跳过重复启动"
+  else
+    printf '是否现在启动 pi-web（浏览器 Web UI，密码保护 + 局域网远程访问）? [y/N] '
+    read -r PI_WEB_ANSWER
+    case "$PI_WEB_ANSWER" in
+      y|Y|yes|YES)
+        printf '设置 pi-web 访问密码（输入不回显）: '
+        read -rs PI_WEB_PASSWORD; echo ""
+        printf '再次确认密码: '
+        read -rs PI_WEB_PASSWORD2; echo ""
+        if [ -z "$PI_WEB_PASSWORD" ]; then
+          err "密码为空，跳过启动 pi-web"
+        elif [ "$PI_WEB_PASSWORD" != "$PI_WEB_PASSWORD2" ]; then
+          err "两次输入不一致，跳过启动 pi-web"
+        else
+          info "后台启动 pi-web（监听 0.0.0.0:$PI_WEB_PORT）……"
+          if nohup env PI_WEB_PASSWORD="$PI_WEB_PASSWORD" pi-web --hostname 0.0.0.0 --port "$PI_WEB_PORT" --no-open >"$AGENT_DIR/pi-web.log" 2>&1 &
+          then
+            PI_WEB_UP=0
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              sleep 2
+              if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$PI_WEB_PORT/" 2>/dev/null; then PI_WEB_UP=1; break; fi
+            done
+            if [ "$PI_WEB_UP" = "1" ]; then
+              ok "pi-web 已启动（日志: $AGENT_DIR/pi-web.log）"
+              info "本机访问:   http://127.0.0.1:$PI_WEB_PORT （密码为刚设置的值）"
+              PI_WEB_IPS="$(node -e 'const os=require("os");const out=[];for(const k of Object.keys(os.networkInterfaces())){for(const a of os.networkInterfaces()[k]||[]){if(a.family==="IPv4"&&!a.internal)out.push(a.address)}}console.log(out.join(" "))' 2>/dev/null || true)"
+              for ip in $PI_WEB_IPS; do
+                info "局域网访问: http://$ip:$PI_WEB_PORT"
+              done
+              info "管理命令:   pi-web status / pi-web stop"
+              warn "注意: 密码走明文 HTTP，仅限可信局域网；公网暴露请配 HTTPS 反向代理或 Tailscale"
+            else
+              err "pi-web 启动后未响应，请查看 $AGENT_DIR/pi-web.log"
+            fi
+          else
+            err "pi-web 启动失败，请查看 $AGENT_DIR/pi-web.log"
+          fi
+          unset PI_WEB_PASSWORD PI_WEB_PASSWORD2
+        fi
+        ;;
+      *)
+        info "已跳过。之后可手动启动: PI_WEB_PASSWORD='你的密码' pi-web --hostname 0.0.0.0"
+        ;;
+    esac
+  fi
+fi
 
 # ---------- 汇总 ----------
 echo ""
@@ -447,6 +506,8 @@ echo "    2. 登录模型： 在 Pi 里运行 /login 选择 provider"
 echo "       或 export ANTHROPIC_API_KEY=sk-... 后再启动"
 echo "    3. 切模型 / 思考档： Ctrl+P 循环模型，Shift+Tab 切 thinking，Ctrl+L 调模型"
 echo "    4. 常用插件命令见各插件文档；/mcp 查看 MCP 连接状态"
+echo "    5. 远程访问 Web UI: PI_WEB_PASSWORD='你的密码' pi-web --hostname 0.0.0.0"
+echo "       （浏览器登录同密码；pi-web status / stop 管理服务）"
 echo ""
 echo "  卸载：npm uninstall -g @earendil-works/pi-coding-agent（配置保留在 $AGENT_DIR）"
 echo ""
